@@ -1,59 +1,46 @@
 import boto3
-from core.settings import S3_BUCKET, DECODE_FILE_PATH, UPLOAD_FILE_PATH
-from core.config import resolutions
-import subprocess
+import json
+from decoder import process_messages
+from core.settings import SQS_QUEUE_URL, REGION
 
 client = boto3.client('s3')
+sqs = boto3.client('sqs', region_name=REGION)
 
-file_name = 'download_video.mp4'
-file_path = f'{UPLOAD_FILE_PATH}/{file_name}'
+#listen for messages
+print("Started Listening for messages...")
 
-def download_file(input_path):
+while True:
+
     try:
-        response = client.get_object(
-            Bucket=S3_BUCKET,
-            Key=file_path
+        response = sqs.receive_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=10
         )
 
-        with open(input_path, "wb") as f:
-            f.write(response['Body'].read())
+        messages = response.get('Messages', [])
+
+        for msg in messages:
+            body = json.loads(msg['Body'])
+
+            if body.get("Event") == "s3:TestEvent":
+                sqs.delete_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    ReceiptHandle=msg['ReceiptHandle']
+                )
+                print("TestEvent deleted (Ack)")
+                continue
+
+            print("Message Received", body)
+            process_messages(body)
+            print("Message has been processed")
+
+            sqs.delete_message(
+                QueueUrl=SQS_QUEUE_URL,
+                ReceiptHandle=msg['ReceiptHandle']
+            )
+
+            print("Message has been deleted (Ack) ")
 
     except Exception as e:
-        print("Get file error ", e)
-    
-
-def upload_file(path):
-    try:
-        client.upload_file(path, S3_BUCKET, path)
-    except Exception as e:
-        print("Error at uploading file ", e)
-        
-
-def transcode_videos(input_path, output_base):
-    output_files = []
-
-    for label, size in resolutions.items():
-        output_path = f'{output_base}/{label}.mp4'
-        command = [
-            "ffmpeg", "-i", input_path,
-            "-vf", f"scale={size}",
-            "-c:a", "copy",
-            output_path
-        ]
-        subprocess.run(command, check=True)
-        upload_file(output_path)
-        output_files.append((label, output_path))
-
-    return output_files
-
-
-def process_video_from_s3():
-    input_path = f'{UPLOAD_FILE_PATH}/{file_name}'
-    output_base = DECODE_FILE_PATH
-    download_file(input_path)
-
-    output_files = transcode_videos(input_path, output_base)
-
-    print("All resolutions processed and uploaded.", output_files)
-
-process_video_from_s3()
+        print("Error processing the message (Nack)", e)
